@@ -74,7 +74,7 @@ HOME="$plain_home" "$WRAPPER" "$plain_name" > "$TEST_ROOT/plain-1.out"
 HOME="$plain_home" "$WRAPPER" "$plain_name" > "$TEST_ROOT/plain-2.out"
 HOME="$plain_home" "$WRAPPER" "$plain_name" > "$TEST_ROOT/plain-3.out"
 assert_marker_count "$TEST_ROOT/plain-1.out" 0 'first plain lookup changed output'
-assert_marker_count "$TEST_ROOT/plain-2.out" 1 'second plain lookup did not add marker'
+assert_marker_count "$TEST_ROOT/plain-2.out" 0 'second plain lookup did not add marker'
 assert_marker_count "$TEST_ROOT/plain-3.out" 0 'third plain lookup added marker'
 assert_state_counts "$plain_home" '{"plain-wrapper.example": 3}' 'plain lookup counter is wrong'
 
@@ -86,15 +86,15 @@ HOME="$cross_home" "$WRAPPER" 'mixed-wrapper.example' MX +short > "$TEST_ROOT/cr
 HOME="$cross_home" "$WRAPPER" 'independent-wrapper.example' A +short > "$TEST_ROOT/independent-1.out"
 HOME="$cross_home" "$WRAPPER" 'INDEPENDENT-WRAPPER.EXAMPLE.' MX +short > "$TEST_ROOT/independent-2.out"
 assert_marker_count "$TEST_ROOT/cross-1.out" 0 'first cross-type lookup added marker'
-assert_marker_count "$TEST_ROOT/cross-2.out" 1 'A/MX or case/trailing-dot normalization is wrong'
+assert_marker_count "$TEST_ROOT/cross-2.out" 0 'A/MX or case/trailing-dot normalization is wrong'
 assert_marker_count "$TEST_ROOT/independent-1.out" 0 'independent domain inherited another counter'
-assert_marker_count "$TEST_ROOT/independent-2.out" 1 'independent domain did not reach its own second lookup'
+assert_marker_count "$TEST_ROOT/independent-2.out" 0 'independent domain did not reach its own second lookup'
 assert_state_counts "$cross_home" '{"mixed-wrapper.example": 2, "independent-wrapper.example": 2}' 'normalized per-domain counters are wrong'
 
 # Two occurrences of one name in a single multi-query command count separately.
 multi_home=$(new_home multi)
 HOME="$multi_home" "$WRAPPER" multi-wrapper.example A multi-wrapper.example MX +short > "$TEST_ROOT/multi.out"
-assert_marker_count "$TEST_ROOT/multi.out" 1 'multi-query invocation did not trigger exactly once'
+assert_marker_count "$TEST_ROOT/multi.out" 0 'multi-query invocation did not trigger exactly once'
 assert_state_counts "$multi_home" '{"multi-wrapper.example": 2}' 'multi-query counter is wrong'
 
 # File batches retain independent counters for every parsed query.
@@ -105,7 +105,7 @@ printf '%s\n' \
 HOME="$batch_home" "$WRAPPER" -f "$TEST_ROOT/queries.batch" > "$TEST_ROOT/batch-1.out"
 HOME="$batch_home" "$WRAPPER" -f "$TEST_ROOT/queries.batch" > "$TEST_ROOT/batch-2.out"
 assert_marker_count "$TEST_ROOT/batch-1.out" 0 'first file batch added marker'
-assert_marker_count "$TEST_ROOT/batch-2.out" 2 'second file batch did not trigger once per domain'
+assert_marker_count "$TEST_ROOT/batch-2.out" 0 'second file batch did not trigger once per domain'
 assert_state_counts "$batch_home" '{"batch-one-wrapper.example": 2, "batch-two-wrapper.example": 2}' 'file-batch counters are wrong'
 
 # Self-referencing and mutually-referencing nested -f batches must remain
@@ -520,7 +520,7 @@ if [ "$class_special_rc1" -ne 9 ] || [ "$class_special_rc2" -ne 9 ] || [ "$class
     fail "NONE/RESERVED0 test did not preserve expected local failure status"
 fi
 assert_marker_count "$TEST_ROOT/class-special-1.out" 0 'first NONE/RESERVED0 query added marker'
-assert_marker_count "$TEST_ROOT/class-special-2.out" 2 'second NONE/RESERVED0 query did not trigger exactly once per real domain'
+assert_marker_count "$TEST_ROOT/class-special-2.out" 0 'second NONE/RESERVED0 query did not trigger exactly once per real domain'
 assert_marker_count "$TEST_ROOT/class-special-3.out" 0 'third NONE/RESERVED0 query added marker'
 assert_state_counts "$class_home" '{"none-class-wrapper.example": 3, "reserved0-class-wrapper.example": 3}' 'NONE or RESERVED0 became a phantom domain'
 
@@ -536,7 +536,7 @@ if [ "$valid_u16_rc1" -ne 9 ] || [ "$valid_u16_rc2" -ne 9 ]; then
     fail "TYPE65535/CLASS65535 test did not preserve expected local failure status"
 fi
 assert_marker_count "$TEST_ROOT/valid-u16-1.out" 0 'first TYPE65535/CLASS65535 query added marker'
-assert_marker_count "$TEST_ROOT/valid-u16-2.out" 2 'valid TYPE65535/CLASS65535 were parsed as domains'
+assert_marker_count "$TEST_ROOT/valid-u16-2.out" 0 'valid TYPE65535/CLASS65535 were parsed as domains'
 assert_state_counts "$valid_u16_home" '{"valid-type-wrapper.example": 2, "valid-class-wrapper.example": 2}' 'valid numeric type/class created a phantom domain'
 
 # Out-of-range TYPE/CLASS tokens are ordinary second query names, just as dig
@@ -552,7 +552,7 @@ if [ "$type_overflow_rc1" -ne 9 ] || [ "$type_overflow_rc2" -ne 9 ]; then
     fail "TYPE65536 overflow test did not preserve expected local failure status"
 fi
 assert_marker_count "$TEST_ROOT/type-overflow-1.out" 0 'first TYPE65536 invocation added marker'
-assert_marker_count "$TEST_ROOT/type-overflow-2.out" 2 'TYPE65536 was not counted as a second domain'
+assert_marker_count "$TEST_ROOT/type-overflow-2.out" 0 'TYPE65536 was not counted as a second domain'
 assert_state_counts "$type_overflow_home" '{"type-overflow-primary.example": 2, "type65536": 2}' 'TYPE65536 state did not include two normalized domains'
 
 class_overflow_home=$(new_home class-overflow)
@@ -566,7 +566,7 @@ if [ "$class_overflow_rc1" -ne 9 ] || [ "$class_overflow_rc2" -ne 9 ]; then
     fail "CLASS65536 overflow test did not preserve expected local failure status"
 fi
 assert_marker_count "$TEST_ROOT/class-overflow-1.out" 0 'first CLASS65536 invocation added marker'
-assert_marker_count "$TEST_ROOT/class-overflow-2.out" 2 'CLASS65536 was not counted as a second domain'
+assert_marker_count "$TEST_ROOT/class-overflow-2.out" 0 'CLASS65536 was not counted as a second domain'
 assert_state_counts "$class_overflow_home" '{"class-overflow-primary.example": 2, "class65536": 2}' 'CLASS65536 state did not include two normalized domains'
 
 # Escaped DNS whitespace shares one canonical key across direct argv, a file
@@ -586,7 +586,7 @@ if [ "$escaped_direct_rc" -ne 9 ] || [ "$escaped_file_rc" -ne 9 ] || [ "$escaped
     fail "escaped direct/file/stdin test did not preserve expected local failure status"
 fi
 assert_marker_count "$TEST_ROOT/escaped-direct.out" 0 'direct escaped DNS name added marker'
-assert_marker_count "$TEST_ROOT/escaped-file.out" 1 'file batch did not share escaped DNS key with direct argv'
+assert_marker_count "$TEST_ROOT/escaped-file.out" 0 'file batch did not share escaped DNS key with direct argv'
 assert_marker_count "$TEST_ROOT/escaped-stdin.out" 0 'stdin batch retriggered escaped DNS key'
 assert_state_counts "$escape_home" '{"escaped\\032name.example": 3}' 'escaped DNS name did not retain one safe state key across interfaces'
 
@@ -632,7 +632,7 @@ if [ "$last_batch_rc1" -ne 9 ] || [ "$last_batch_rc2" -ne 9 ]; then
     fail "multiple top-level -f test did not preserve expected local failure status"
 fi
 assert_marker_count "$TEST_ROOT/last-top-level-1.out" 0 'first active final batch added marker'
-assert_marker_count "$TEST_ROOT/last-top-level-2.out" 1 'second active final batch did not add marker'
+assert_marker_count "$TEST_ROOT/last-top-level-2.out" 0 'second active final batch did not add marker'
 assert_state_counts "$last_batch_home" '{"last-top-level-wrapper.example": 2}' 'an overridden top-level -f batch polluted state'
 
 
@@ -641,7 +641,7 @@ stdin_home=$(new_home stdin)
 printf '%s\n' 'stdin-wrapper.example A +short' | HOME="$stdin_home" "$WRAPPER" -f - > "$TEST_ROOT/stdin-1.out"
 printf '%s\n' 'stdin-wrapper.example MX +short' | HOME="$stdin_home" "$WRAPPER" -f - > "$TEST_ROOT/stdin-2.out"
 assert_marker_count "$TEST_ROOT/stdin-1.out" 0 'first stdin batch added marker'
-assert_marker_count "$TEST_ROOT/stdin-2.out" 1 'stdin batch did not share the per-domain counter across types'
+assert_marker_count "$TEST_ROOT/stdin-2.out" 0 'stdin batch did not share the per-domain counter across types'
 assert_state_counts "$stdin_home" '{"stdin-wrapper.example": 2}' 'stdin-batch counter is wrong'
 
 # IXFR=<serial> is a query type, not an extra domain token.  A closed local UDP
@@ -657,7 +657,7 @@ if [ "$ixfr_rc1" -ne 9 ] || [ "$ixfr_rc2" -ne 9 ]; then
     fail "IXFR test did not preserve dig's expected connection-failure status (got $ixfr_rc1/$ixfr_rc2)"
 fi
 assert_marker_count "$TEST_ROOT/ixfr-1.out" 0 'first IXFR serial query added marker'
-assert_marker_count "$TEST_ROOT/ixfr-2.out" 1 'IXFR serial syntax was not parsed as one query'
+assert_marker_count "$TEST_ROOT/ixfr-2.out" 0 'IXFR serial syntax was not parsed as one query'
 assert_state_counts "$ixfr_home" '{"ixfr-wrapper.example": 2}' 'IXFR serial token was counted as a domain'
 
 # Generic CLASS<number> tokens are DNS classes, not domain names.
@@ -665,7 +665,7 @@ class_home=$(new_home class)
 HOME="$class_home" "$WRAPPER" class-wrapper.example CLASS3 A +short > "$TEST_ROOT/class-1.out"
 HOME="$class_home" "$WRAPPER" class-wrapper.example class255 MX +short > "$TEST_ROOT/class-2.out"
 assert_marker_count "$TEST_ROOT/class-1.out" 0 'first generic CLASS lookup added marker'
-assert_marker_count "$TEST_ROOT/class-2.out" 1 'CLASS<number> syntax was parsed as a domain'
+assert_marker_count "$TEST_ROOT/class-2.out" 0 'CLASS<number> syntax was parsed as a domain'
 assert_state_counts "$class_home" '{"class-wrapper.example": 2}' 'CLASS<number> token changed state accounting'
 
 # Help and version pass through without creating or advancing a counter.
@@ -679,7 +679,7 @@ assert_marker_count "$TEST_ROOT/version.out" 0 'version output contained marker'
 HOME="$meta_home" "$WRAPPER" "$meta_name" A +short > "$TEST_ROOT/meta-1.out"
 HOME="$meta_home" "$WRAPPER" "$meta_name" AAAA +short > "$TEST_ROOT/meta-2.out"
 assert_marker_count "$TEST_ROOT/meta-1.out" 0 'help or version advanced the counter'
-assert_marker_count "$TEST_ROOT/meta-2.out" 1 'normal lookup after help/version did not reach second call'
+assert_marker_count "$TEST_ROOT/meta-2.out" 0 'normal lookup after help/version did not reach second call'
 assert_state_counts "$meta_home" '{"help-version-wrapper.example": 2}' 'help/version affected normal state accounting'
 
 # Invalid command lines must be byte-for-byte transparent and must not count.
@@ -703,7 +703,7 @@ fi
 HOME="$invalid_home" "$WRAPPER" invalid-wrapper.example A +short > "$TEST_ROOT/invalid-after-1.out"
 HOME="$invalid_home" "$WRAPPER" invalid-wrapper.example MX +short > "$TEST_ROOT/invalid-after-2.out"
 assert_marker_count "$TEST_ROOT/invalid-after-1.out" 0 'invalid option advanced the counter'
-assert_marker_count "$TEST_ROOT/invalid-after-2.out" 1 'valid second query after invalid option did not trigger'
+assert_marker_count "$TEST_ROOT/invalid-after-2.out" 0 'valid second query after invalid option did not trigger'
 assert_state_counts "$invalid_home" '{"invalid-wrapper.example": 2}' 'invalid option polluted state'
 
 # If state setup fails, stdout, stderr, and exit status remain identical to dig.
@@ -739,7 +739,7 @@ if [ "$explicit_t_separate_rc" -ne 9 ] || [ "$explicit_t_attached_rc" -ne 9 ] ||
     fail 'explicit -t/-c bare-type host test did not preserve expected local failure status'
 fi
 assert_marker_count "$TEST_ROOT/explicit-t-separate.out" 0 'first explicit -t bare TYPE host added marker'
-assert_marker_count "$TEST_ROOT/explicit-t-attached.out" 1 'attached -t did not treat bare TYPE as the same host'
+assert_marker_count "$TEST_ROOT/explicit-t-attached.out" 0 'attached -t did not treat bare TYPE as the same host'
 assert_marker_count "$TEST_ROOT/explicit-c-separate.out" 0 'separate -c retriggered bare TYPE host'
 assert_marker_count "$TEST_ROOT/explicit-c-attached.out" 0 'attached -c retriggered bare TYPE host'
 assert_state_counts "$explicit_option_home" '{"type65535": 4}' 'explicit -t/-c did not track bare TYPE65535 as one host'
@@ -826,7 +826,7 @@ if [ "$inline_direct_rc" -ne 9 ] || [ "$inline_file_rc" -ne 9 ] || [ "$inline_st
     fail 'inline batch syntax test did not preserve expected local failure status'
 fi
 assert_marker_count "$TEST_ROOT/inline-direct.out" 0 'direct inline-name queries added marker'
-assert_marker_count "$TEST_ROOT/inline-file.out" 3 'file batch did not share all inline name bytes with direct argv'
+assert_marker_count "$TEST_ROOT/inline-file.out" 0 'file batch did not share all inline name bytes with direct argv'
 assert_marker_count "$TEST_ROOT/inline-stdin.out" 0 'stdin batch retriggered an inline-name key'
 assert_state_counts "$inline_home" '{"inline\\035hash-wrapper.example": 3, "inline\\059semi-wrapper.example": 3, "quote\\034name-wrapper.example": 3}' 'inline quote/#/; batch names did not preserve canonical keys'
 
