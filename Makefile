@@ -1,6 +1,7 @@
 .PHONY: test verify
 
 test:
+	/usr/bin/python3 tests/test_overlay_evidence.py
 	./tests/test_wrapper.sh
 	/usr/bin/python3 tests/test_install_restore.py
 
@@ -11,5 +12,7 @@ verify:
 	/bin/sh -n scripts/restore.sh
 	/bin/sh -n tests/test_wrapper.sh
 	/usr/bin/python3 -m py_compile tests/test_install_restore.py
+	/usr/bin/python3 -m py_compile tests/test_overlay_evidence.py
+	/usr/bin/python3 tests/test_overlay_evidence.py
 	./tests/test_wrapper.sh
 	/usr/bin/python3 tests/test_install_restore.py

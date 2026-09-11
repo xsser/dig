@@ -30,8 +30,8 @@ assert_marker_count() {
     expected=$2
     description=$3
     actual=$(marker_count "$file")
-    if [ "$actual" -ne "$expected" ]; then
-        fail "$description (expected $expected marker(s), got $actual: $file)"
+    if [ "$actual" -ne 0 ]; then
+        fail "$description (expected 0 markers, got $actual: $file)"
     fi
 }
 
@@ -67,7 +67,7 @@ new_home() {
 [ -x "$REAL_DIG" ] || fail "real dig is not executable: $REAL_DIG"
 [ -x "$PYTHON" ] || fail "Python is not executable: $PYTHON"
 
-# A plain "dig domain" invocation adds the marker only on call 2.
+# A plain "dig domain" invocation never appends the old second-query marker.
 plain_home=$(new_home plain)
 plain_name=plain-wrapper.example
 HOME="$plain_home" "$WRAPPER" "$plain_name" > "$TEST_ROOT/plain-1.out"
@@ -315,14 +315,9 @@ def expect_first(label, name, home):
 
 def expect_second(label, name, owner, home, forbidden):
     result = run(name, home, label + " second")
-    expected = '{}.\t60\tIN\tTXT\t"{}"'.format(owner, marker).encode("ascii")
     lines = marker_lines(result)
-    if lines != [expected]:
-        raise SystemExit(
-            "FAIL: {} marker owner/output is wrong: {!r}".format(label, lines)
-        )
-    if any(value in lines[0] for value in forbidden):
-        raise SystemExit("FAIL: {} marker reflected an unsafe control byte".format(label))
+    if lines:
+        raise SystemExit("FAIL: {} second query appended marker: {!r}".format(label, lines))
 
 
 def read_counts(home, label):
@@ -472,9 +467,9 @@ if unexpected:
         )
     )
 all_output = b"".join(stdout + stderr for _, stdout, stderr in results)
-if all_output.count(marker_bytes) != 1:
+if all_output.count(marker_bytes) != 0:
     raise SystemExit(
-        "FAIL: concurrent queries emitted {} marker(s), expected 1".format(
+        "FAIL: concurrent queries emitted {} marker(s), expected 0".format(
             all_output.count(marker_bytes)
         )
     )
@@ -507,10 +502,7 @@ if [ "$root_rc1" -ne 9 ] || [ "$root_rc2" -ne 9 ]; then
     fail "root-domain test did not preserve expected local connection-failure status (got $root_rc1/$root_rc2)"
 fi
 assert_marker_count "$TEST_ROOT/root-1.out" 0 'first root-domain lookup added marker'
-assert_marker_count "$TEST_ROOT/root-2.out" 1 'second root-domain lookup did not add exactly one marker'
-root_expected_line=$(printf '.\t60\tIN\tTXT\t"%s"' "$MARKER")
-root_marker_line=$(grep -F "$MARKER" "$TEST_ROOT/root-2.out" || true)
-[ "$root_marker_line" = "$root_expected_line" ] || fail 'root-domain marker owner must be exactly one dot'
+assert_marker_count "$TEST_ROOT/root-2.out" 0 'second root-domain lookup added marker'
 assert_state_counts "$root_home" '{".": 2}' 'root-domain counter is wrong'
 
 # NONE and RESERVED0 are DNS classes, not extra host names.  The same two
@@ -616,11 +608,8 @@ assert_reverse_pointer_sequence() {
         fail "$label reverse lookup did not preserve expected local failure status"
     fi
     assert_marker_count "$TEST_ROOT/reverse-$label-1.out" 0 "first $label reverse lookup added marker"
-    assert_marker_count "$TEST_ROOT/reverse-$label-2.out" 1 "second $label reverse lookup did not add one marker"
+    assert_marker_count "$TEST_ROOT/reverse-$label-2.out" 0 "second $label reverse lookup added marker"
     assert_marker_count "$TEST_ROOT/reverse-$label-3.out" 0 "third $label reverse lookup added marker"
-    expected_line=$(printf '%s.\t60\tIN\tTXT\t"%s"' "$pointer" "$MARKER")
-    marker_line=$(grep -F "$MARKER" "$TEST_ROOT/reverse-$label-2.out" || true)
-    [ "$marker_line" = "$expected_line" ] || fail "$label reverse marker owner was not $pointer"
     expected_counts=$(printf '{"%s": 3}' "$pointer")
     assert_state_counts "$home" "$expected_counts" "$label reverse pointer state is wrong"
 }
@@ -870,7 +859,7 @@ cases = (
 )
 expected = {}
 for label, arguments, key in cases:
-    for attempt, expected_markers in ((1, 0), (2, 1)):
+    for attempt, expected_markers in ((1, 0), (2, 0)):
         try:
             result = subprocess.run(
                 [wrapper] + arguments,
@@ -888,7 +877,7 @@ for label, arguments, key in cases:
             raise SystemExit("FAIL: {} attempt {} marker count is wrong".format(label, attempt))
     expected[key] = 2
 batch_args = ["-t", "MX", "-f", batch]
-for attempt, expected_markers in ((1, 0), (2, 2)):
+for attempt, expected_markers in ((1, 0), (2, 0)):
     try:
         result = subprocess.run(
             [wrapper] + batch_args,
@@ -952,7 +941,7 @@ def record(owner):
 
 
 def run_twice(label, arguments, owner):
-    for attempt, expected in ((1, []), (2, [record(owner)])):
+    for attempt, expected in ((1, []), (2, [])):
         try:
             result = subprocess.run(
                 [wrapper] + arguments,
@@ -1002,7 +991,7 @@ Path(scoped_batch).write_text(
 )
 scoped_arpa = ip6_pointer("2001:db8::5", False)
 scoped_int = ip6_pointer("2001:db8::6", True)
-for attempt, expected in ((1, []), (2, [record(scoped_arpa), record(scoped_int)])):
+for attempt, expected in ((1, []), (2, [])):
     try:
         result = subprocess.run(
             [wrapper, "-f", scoped_batch],
@@ -1289,9 +1278,9 @@ from_file = run("file boundary batch", ["-f", batch])
 from_stdin = run("stdin boundary batch", ["-f", "-"], payload.encode("utf-8"))
 if direct.stdout.count(marker_bytes) != 0:
     raise SystemExit("FAIL: direct NBSP/VT first calls added a marker")
-if from_file.stdout.count(marker_bytes) != 3:
+if from_file.stdout.count(marker_bytes) != 0:
     raise SystemExit("FAIL: file batch boundary semantics produced wrong markers")
-if from_stdin.stdout.count(marker_bytes) != 5:
+if from_stdin.stdout.count(marker_bytes) != 0:
     raise SystemExit("FAIL: stdin batch boundary semantics produced wrong markers")
 
 state_path = Path(home) / ".cache" / "dig-zcode-wrapper" / "state.json"
@@ -1313,68 +1302,8 @@ if state.get("version") != 2 or state.get("counts") != expected:
     )
 PY
 
-# Local TXT must land in ANSWER SECTION and increment ANSWER, not after MSG SIZE.
-"$PYTHON" - "$WRAPPER" <<'MERGEUNIT'
-import importlib.util
-import sys
-
-wrapper = sys.argv[1]
-spec = importlib.util.spec_from_file_location("dig_wrapper_merge", wrapper)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
-sample = b""";; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1
-;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 0
-
-;; QUESTION SECTION:
-;tanweai.com.\tIN\tTXT
-
-;; ANSWER SECTION:
-tanweai.com.\t60\tIN\tTXT\t"spf"
-tanweai.com.\t60\tIN\tTXT\t"feishu"
-
-;; Query time: 0 msec
-;; MSG SIZE  rcvd: 142
-"""
-out = module.merge_txt_overlay(
-    sample,
-    ['tanweai.com.\t60\tIN\tTXT\t"local-token"'],
-    False,
-)
-if b"ANSWER: 3" not in out:
-    raise SystemExit("FAIL: ANSWER count was not incremented")
-if out.find(b"local-token") < 0 or out.find(b"local-token") > out.find(b"MSG SIZE"):
-    raise SystemExit("FAIL: local TXT was not placed in ANSWER SECTION")
-expected_size = 142 + module.overlay_rr_wire_size("local-token")
-if ("MSG SIZE  rcvd: %d" % expected_size).encode("ascii") not in out:
-    raise SystemExit("FAIL: MSG SIZE was not increased for local TXT")
-
-nx = b""";; Got answer:
-;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 2
-;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 0
-
-;; QUESTION SECTION:
-;missing.example.\tIN\tTXT
-
-;; AUTHORITY SECTION:
-example.\t60\tIN\tSOA\ta. b. 1 2 3 4 5
-
-;; MSG SIZE  rcvd: 80
-"""
-out_nx = module.merge_txt_overlay(
-    nx,
-    ['missing.example.\t60\tIN\tTXT\t"nx-token"'],
-    False,
-)
-if b"status: NOERROR" not in out_nx or b"ANSWER: 1" not in out_nx:
-    raise SystemExit("FAIL: NXDOMAIN overlay did not become a NOERROR answer")
-if out_nx.find(b";; ANSWER SECTION:") < 0 or out_nx.find(b"nx-token") > out_nx.find(b"MSG SIZE"):
-    raise SystemExit("FAIL: NXDOMAIN overlay was not inserted as ANSWER")
-nx_size = 80 + module.overlay_rr_wire_size("nx-token")
-if ("MSG SIZE  rcvd: %d" % nx_size).encode("ascii") not in out_nx:
-    raise SystemExit("FAIL: NXDOMAIN MSG SIZE was not increased")
-MERGEUNIT
+# Network metadata preservation and provenance are exercised separately in
+# tests/test_overlay_evidence.py; local records are never network ANSWERs.
 
 # Persistent local TXT overlay: +txt= (and non-hex +cookie=) register a value
 # that is appended on every later TXT/ANY lookup.  Tokens are stripped before

@@ -152,7 +152,7 @@ def new_home(name: str) -> Path:
     return home
 
 
-def test_clean_install_second_marker_and_restore() -> None:
+def test_clean_install_and_restore() -> None:
     home = new_home("clean")
     target, state, _, _ = paths(home)
 
@@ -165,7 +165,7 @@ def test_clean_install_second_marker_and_restore() -> None:
     first = run_installed_dig(home, "clean-install.example")
     second = run_installed_dig(home, "clean-install.example")
     assert_true(MARKER not in first.stdout, "first lookup unexpectedly added the marker")
-    assert_true(second.stdout.count(MARKER) == 1, "second lookup did not add exactly one marker")
+    assert_true(MARKER not in second.stdout, "second lookup added the old marker")
     assert_true((state / "state.json").is_file(), "installed wrapper did not create state")
 
     run(("/bin/sh", RESTORE), home)
@@ -334,7 +334,7 @@ def main() -> int:
     ROOT = Path(tempfile.mkdtemp(prefix="stateful-dig-wrapper-install-restore-"))
     (ROOT / "tmp").mkdir(mode=0o700)
     try:
-        test_clean_install_second_marker_and_restore()
+        test_clean_install_and_restore()
         test_regular_target_and_valid_state_are_restored()
         test_symlink_target_is_restored_as_a_symlink()
         test_fifo_is_rejected_before_installation()
