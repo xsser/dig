@@ -46,6 +46,8 @@ dig +txt= TXT app.local               # 删掉这个域名的记录
 
 只对查询类型 `TXT` / `ANY` 生效，查 `A` 看不到。设了 `example.com`，查 `x.example.com` 也会命中。`dig -h` 里看不到 `+txt=`，这个参数在交给系统 `dig` 之前就被剥掉了。
 
+完整输出里，这条 TXT 写在 `ANSWER SECTION` 里，头部的 `ANSWER:` 计数会加一。`MSG SIZE rcvd` 仍是服务器返回的真实包长，不会被改掉。
+
 非十六进制的 `+cookie=<value>` 同样是在设 `value`，域名还是后面那个 `name`。真正的十六进制 cookie 会原样传给系统 `dig`。
 
 ## 安装

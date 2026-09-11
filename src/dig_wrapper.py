@@ -793,6 +793,131 @@ def run_real_dig(args: List[str], stdin_payload: Optional[bytes] = None) -> int:
     return subprocess.run([REAL_DIG] + args, input=stdin_payload).returncode
 
 
+def capture_real_dig(
+    args: List[str], stdin_payload: Optional[bytes] = None
+) -> Tuple[int, bytes]:
+    result = subprocess.run(
+        [REAL_DIG] + args,
+        input=stdin_payload,
+        stdout=subprocess.PIPE,
+        check=False,
+    )
+    return result.returncode, result.stdout or b""
+
+
+def bump_flags_answer(message: bytes, count: int) -> bytes:
+    pattern = re.compile(rb"(;; flags:[^\n]*ANSWER: )(\d+)")
+
+    def repl(match: "re.Match[bytes]") -> bytes:
+        return match.group(1) + str(int(match.group(2)) + count).encode("ascii")
+
+    return pattern.sub(repl, message, count=1)
+
+
+def insert_into_answer_section(message: bytes, extra: bytes) -> bytes:
+    marker = b";; ANSWER SECTION:\n"
+    start = message.find(marker)
+    if start < 0:
+        return message
+    body = start + len(marker)
+    gap = message.find(b"\n\n", body)
+    if gap < 0:
+        if not message.endswith(b"\n"):
+            message += b"\n"
+        return message + extra
+    return message[:gap] + b"\n" + extra.rstrip(b"\n") + message[gap:]
+
+
+def insert_new_answer_section(message: bytes, extra: bytes) -> bytes:
+    question = b";; QUESTION SECTION:\n"
+    start = message.find(question)
+    if start < 0:
+        if not message.endswith(b"\n"):
+            message += b"\n"
+        return message + extra
+    gap = message.find(b"\n\n", start)
+    if gap < 0:
+        if not message.endswith(b"\n"):
+            message += b"\n"
+        return message + b";; ANSWER SECTION:\n" + extra
+    block = b";; ANSWER SECTION:\n" + extra
+    if not block.endswith(b"\n"):
+        block += b"\n"
+    if not block.endswith(b"\n\n"):
+        block += b"\n"
+    return message[: gap + 2] + block + message[gap + 2 :]
+
+
+def question_owner(message: bytes) -> bytes:
+    match = re.search(rb";; QUESTION SECTION:\n;([^\s]+)", message)
+    return match.group(1) if match else b""
+
+
+def extra_lines_for_message(
+    message: bytes, extra_lines: List[str], sole_message: bool
+) -> List[str]:
+    if sole_message:
+        return extra_lines
+    owner = question_owner(message)
+    if not owner:
+        return []
+    selected: List[str] = []
+    for line in extra_lines:
+        if line.startswith('"'):
+            continue
+        line_owner = line.split("\t", 1)[0].encode("utf-8")
+        if line_owner.rstrip(b".") == owner.rstrip(b"."):
+            selected.append(line)
+    return selected
+
+
+def inject_one_message(message: bytes, lines: List[str]) -> bytes:
+    if not lines:
+        return message
+    extra = "".join(line + "\n" for line in lines).encode("utf-8")
+    count = len(lines)
+    if b";; ANSWER SECTION:\n" in message:
+        return bump_flags_answer(insert_into_answer_section(message, extra), count)
+    updated = message.replace(b"status: NXDOMAIN", b"status: NOERROR", 1)
+    return insert_new_answer_section(bump_flags_answer(updated, count), extra)
+
+
+def merge_txt_overlay(stdout: bytes, extra_lines: List[str], short: bool) -> bytes:
+    """Put local TXT into ANSWER SECTION and bump ANSWER count.
+
+    MSG SIZE stays the real server packet length.  +short has no sections, so
+    extra lines are appended.  Timeout / no-header output also appends.
+    """
+    if not extra_lines:
+        return stdout
+    extra = "".join(line + "\n" for line in extra_lines).encode("utf-8")
+    if short or not stdout or b";; ->>HEADER<<-" not in stdout:
+        if stdout and not stdout.endswith(b"\n"):
+            return stdout + b"\n" + extra
+        return stdout + extra
+
+    token = b";; Got answer:"
+    first = stdout.find(token)
+    if first < 0:
+        if stdout and not stdout.endswith(b"\n"):
+            return stdout + b"\n" + extra
+        return stdout + extra
+
+    head = stdout[:first]
+    chunks = stdout[first:].split(b"\n" + token)
+    sole = len(chunks) == 1
+    merged = [head, inject_one_message(chunks[0], extra_lines_for_message(chunks[0], extra_lines, sole))]
+    for chunk in chunks[1:]:
+        message = token + chunk
+        merged.append(
+            b"\n"
+            + inject_one_message(
+                message, extra_lines_for_message(message, extra_lines, False)
+            )
+        )
+    return b"".join(merged)
+
+
 def redirect_stdout_to_devnull() -> None:
     """Detach stdout from a closed downstream pipe before interpreter exit."""
     try:
@@ -857,8 +982,14 @@ def main() -> int:
             except (OSError, ValueError, WrapperError, json.JSONDecodeError):
                 pass
 
-    return_code = run_real_dig(args, stdin_payload)
+    return_code, stdout = capture_real_dig(args, stdin_payload)
     if return_code not in {0, 9} or not queries:
+        try:
+            if stdout:
+                sys.stdout.buffer.write(stdout)
+                sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            redirect_stdout_to_devnull()
         return return_like_child(return_code)
 
     injected: List[str] = []
@@ -874,19 +1005,23 @@ def main() -> int:
         except (OSError, ValueError, WrapperError, json.JSONDecodeError):
             triggered = []
 
-    try:
-        for line in injected:
-            print(line)
-        for query in triggered:
-            if query.short:
-                print('"{}"'.format(MARKER))
-            else:
-                print(
-                    '{}	60	IN	TXT	"{}"'.format(
-                        marker_owner_name(query.name), MARKER
-                    )
+    extra_lines = list(injected)
+    for query in triggered:
+        if query.short:
+            extra_lines.append('"{}"'.format(MARKER))
+        else:
+            extra_lines.append(
+                '{}	60	IN	TXT	"{}"'.format(
+                    marker_owner_name(query.name), MARKER
                 )
-        sys.stdout.flush()
+            )
+
+    short = bool(queries) and all(query.short for query in queries)
+    stdout = merge_txt_overlay(stdout, extra_lines, short)
+    try:
+        if stdout:
+            sys.stdout.buffer.write(stdout)
+            sys.stdout.buffer.flush()
     except BrokenPipeError:
         redirect_stdout_to_devnull()
         try:

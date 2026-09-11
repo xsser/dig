@@ -1313,6 +1313,65 @@ if state.get("version") != 2 or state.get("counts") != expected:
     )
 PY
 
+# Local TXT must land in ANSWER SECTION and increment ANSWER, not after MSG SIZE.
+"$PYTHON" - "$WRAPPER" <<'MERGEUNIT'
+import importlib.util
+import sys
+
+wrapper = sys.argv[1]
+spec = importlib.util.spec_from_file_location("dig_wrapper_merge", wrapper)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+sample = b""";; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;tanweai.com.\tIN\tTXT
+
+;; ANSWER SECTION:
+tanweai.com.\t60\tIN\tTXT\t"spf"
+tanweai.com.\t60\tIN\tTXT\t"feishu"
+
+;; Query time: 0 msec
+;; MSG SIZE  rcvd: 142
+"""
+out = module.merge_txt_overlay(
+    sample,
+    ['tanweai.com.\t60\tIN\tTXT\t"local-token"'],
+    False,
+)
+if b"ANSWER: 3" not in out:
+    raise SystemExit("FAIL: ANSWER count was not incremented")
+if out.find(b"local-token") < 0 or out.find(b"local-token") > out.find(b"MSG SIZE"):
+    raise SystemExit("FAIL: local TXT was not placed in ANSWER SECTION")
+if b"MSG SIZE  rcvd: 142" not in out:
+    raise SystemExit("FAIL: MSG SIZE should stay the real packet length")
+
+nx = b""";; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 2
+;; flags: qr rd ra; QUERY: 1, ANSWER: 0, AUTHORITY: 1, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;missing.example.\tIN\tTXT
+
+;; AUTHORITY SECTION:
+example.\t60\tIN\tSOA\ta. b. 1 2 3 4 5
+
+;; MSG SIZE  rcvd: 80
+"""
+out_nx = module.merge_txt_overlay(
+    nx,
+    ['missing.example.\t60\tIN\tTXT\t"nx-token"'],
+    False,
+)
+if b"status: NOERROR" not in out_nx or b"ANSWER: 1" not in out_nx:
+    raise SystemExit("FAIL: NXDOMAIN overlay did not become a NOERROR answer")
+if out_nx.find(b";; ANSWER SECTION:") < 0 or out_nx.find(b"nx-token") > out_nx.find(b"MSG SIZE"):
+    raise SystemExit("FAIL: NXDOMAIN overlay was not inserted as ANSWER")
+MERGEUNIT
+
 # Persistent local TXT overlay: +txt= (and non-hex +cookie=) register a value
 # that is appended on every later TXT/ANY lookup.  Tokens are stripped before
 # /usr/bin/dig sees them, so dig -h remains unchanged.
