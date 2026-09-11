@@ -57,8 +57,9 @@ class Query:
 
 def canonical_type(value: str) -> str:
     upper = value.upper()
-    if upper == "TYPE16":
-        return "TXT"
+    if is_u16_token(upper, "TYPE"):
+        number = int(upper[len("TYPE"):])
+        return {16: "TXT", 255: "ANY"}.get(number, "TYPE{}".format(number))
     if re.fullmatch(r"IXFR=\d+", upper):
         return "IXFR"
     return upper
@@ -520,7 +521,24 @@ def uses_stdin_batch(args: List[str]) -> bool:
     return batch_files == ["-"]
 
 
-def state_directory() -> Path:
+def validate_state_owner(directory: Path) -> None:
+    """Validate an existing owner marker without write access or FIFO blocking."""
+    owner = directory / ".owner"
+    fd = os.open(str(owner), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise WrapperError("state owner marker is not a regular file")
+        expected = OWNER_TEXT.encode("utf-8")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            if handle.read(len(expected) + 1) != expected:
+                raise WrapperError("state directory is not owned by this wrapper")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def state_directory(initialize: bool = True) -> Path:
     path = Path.home() / ".cache" / "dig-zcode-wrapper"
     parent = path.parent.resolve(strict=True)
     candidate = parent / "dig-zcode-wrapper"
@@ -528,10 +546,11 @@ def state_directory() -> Path:
     if candidate in {Path("/"), home}:
         raise WrapperError("refusing unsafe state directory")
 
-    try:
-        candidate.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
+    if initialize:
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
 
     info = candidate.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -540,6 +559,10 @@ def state_directory() -> Path:
         raise WrapperError("state directory must not be accessible by group or others")
     if candidate.resolve(strict=True) != candidate:
         raise WrapperError("state directory resolution changed unexpectedly")
+
+    if not initialize:
+        validate_state_owner(candidate)
+        return candidate
 
     # Serialize owner initialization and validation.  Without this lock, a
     # concurrent first invocation can observe the just-created but not-yet-
@@ -559,16 +582,7 @@ def state_directory() -> Path:
             finally:
                 os.close(owner_fd)
 
-        try:
-            owner_info = owner.lstat()
-            if not stat.S_ISREG(owner_info.st_mode) or owner.is_symlink():
-                raise WrapperError("state owner marker is not a regular file")
-            if owner.read_text(encoding="utf-8") != OWNER_TEXT:
-                raise WrapperError("state directory is not owned by this wrapper")
-        except OSError as error:
-            raise WrapperError(
-                "cannot validate state owner marker: {}".format(error)
-            ) from error
+        validate_state_owner(candidate)
 
     return candidate
 
@@ -664,6 +678,31 @@ def update_counts(directory: Path, queries: List[Query]) -> List[Query]:
 OVERLAY_TTL = 600
 
 
+def expand_positional_txt(args: List[str]) -> List[str]:
+    """Translate ``dig name value`` into the existing local TXT setter.
+
+    Native types/classes/options retain their meaning. Use ``name -- value``
+    to set a value that would otherwise be interpreted as native syntax;
+    it may be preceded by ``+`` options such as ``+ttl=`` and by an ``@server``.
+    """
+    explicit = len(args) >= 3 and args[-2] == "--"
+    prefix = args[:-3] if explicit else []
+    if explicit and not all(token.startswith(("+", "@")) for token in prefix):
+        return args
+    if not explicit and len(args) != 2:
+        return args
+    name, value = args[-3 if explicit else 0], args[-1]
+    if name.startswith(("-", "+", "@")) or canonical_trackable_name(name) is None:
+        return args
+    if not explicit and (
+        is_query_type(name) or is_query_class(name)
+        or is_query_type(value) or is_query_class(value)
+        or value.startswith(("-", "+", "@"))
+    ):
+        return args
+    return prefix + ["-q", name, "-t", "TXT", "+txt=" + value]
+
+
 def extract_txt_value(
     args: List[str],
 ) -> Tuple[List[str], Optional[str], Optional[int]]:
@@ -678,7 +717,7 @@ def extract_txt_value(
     cleaned: List[str] = []
     value: Optional[str] = None
     ttl: Optional[int] = None
-    for token in args:
+    for token in expand_positional_txt(args):
         if token.startswith("+txt="):
             value = token[len("+txt="):]
             continue
@@ -699,14 +738,25 @@ def is_txt_cookie(value: str) -> bool:
 
 
 def format_txt_string(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return '"{}"'.format(escaped)
+    """Render local text without emitting terminal controls or fake lines."""
+    escaped: List[str] = []
+    for byte in value.encode("utf-8"):
+        if byte in {34, 92}:
+            escaped.append("\\" + chr(byte))
+        elif 32 <= byte <= 126:
+            escaped.append(chr(byte))
+        else:
+            escaped.append("\\{:03d}".format(byte))
+    return '"{}"'.format("".join(escaped))
 
 
 def lookup_txt_record(
     records: Dict[str, Tuple[str, int]], name: str
 ) -> Optional[Tuple[str, int]]:
-    current = name.rstrip(".") or "."
+    """Return the overlay for name or its nearest ancestor below the root."""
+    current = normalize_name(name)
+    if current == ".":
+        return records.get(".")
     while current not in {"", "."}:
         if current in records:
             return records[current]
@@ -842,168 +892,18 @@ def capture_real_dig(
     return result.returncode, result.stdout or b""
 
 
-def bump_flags_answer(message: bytes, count: int) -> bytes:
-    pattern = re.compile(rb"(;; flags:[^\n]*ANSWER: )(\d+)")
-
-    def repl(match: "re.Match[bytes]") -> bytes:
-        return match.group(1) + str(int(match.group(2)) + count).encode("ascii")
-
-    return pattern.sub(repl, message, count=1)
-
-
-def insert_into_answer_section(message: bytes, extra: bytes) -> bytes:
-    marker = b";; ANSWER SECTION:\n"
-    start = message.find(marker)
-    if start < 0:
-        return message
-    body = start + len(marker)
-    gap = message.find(b"\n\n", body)
-    if gap < 0:
-        if not message.endswith(b"\n"):
-            message += b"\n"
-        return message + extra
-    return message[:gap] + b"\n" + extra.rstrip(b"\n") + message[gap:]
-
-
-def insert_new_answer_section(message: bytes, extra: bytes) -> bytes:
-    question = b";; QUESTION SECTION:\n"
-    start = message.find(question)
-    if start < 0:
-        if not message.endswith(b"\n"):
-            message += b"\n"
-        return message + extra
-    gap = message.find(b"\n\n", start)
-    if gap < 0:
-        if not message.endswith(b"\n"):
-            message += b"\n"
-        return message + b";; ANSWER SECTION:\n" + extra
-    block = b";; ANSWER SECTION:\n" + extra
-    if not block.endswith(b"\n"):
-        block += b"\n"
-    if not block.endswith(b"\n\n"):
-        block += b"\n"
-    return message[: gap + 2] + block + message[gap + 2 :]
-
-
-def question_owner(message: bytes) -> bytes:
-    match = re.search(rb";; QUESTION SECTION:\n;([^\s]+)", message)
-    return match.group(1) if match else b""
-
-
-def extra_lines_for_message(
-    message: bytes, extra_lines: List[str], sole_message: bool
-) -> List[str]:
-    if sole_message:
-        return extra_lines
-    owner = question_owner(message)
-    if not owner:
-        return []
-    selected: List[str] = []
-    for line in extra_lines:
-        if line.startswith('"'):
-            continue
-        line_owner = line.split("\t", 1)[0].encode("utf-8")
-        if line_owner.rstrip(b".") == owner.rstrip(b"."):
-            selected.append(line)
-    return selected
-
-
-def unescape_txt_presentation(rendered: str) -> str:
-    if len(rendered) >= 2 and rendered[0] == '"' and rendered[-1] == '"':
-        return rendered[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-    return rendered
-
-
-def txt_rdata_wire_size(value: str) -> int:
-    raw = value.encode("utf-8")
-    if not raw:
-        return 1
-    size = 0
-    offset = 0
-    while offset < len(raw):
-        chunk = min(255, len(raw) - offset)
-        size += 1 + chunk
-        offset += chunk
-    return size
-
-
-def overlay_rr_wire_size(value: str) -> int:
-    # compressed name pointer + TYPE + CLASS + TTL + RDLEN + RDATA
-    return 2 + 2 + 2 + 4 + 2 + txt_rdata_wire_size(value)
-
-
-def extra_msg_size(lines: List[str]) -> int:
-    total = 0
-    for line in lines:
-        if line.startswith('"'):
-            value = unescape_txt_presentation(line)
-        elif "\tTXT\t" in line:
-            value = unescape_txt_presentation(line.split("\tTXT\t", 1)[1])
-        else:
-            continue
-        total += overlay_rr_wire_size(value)
-    return total
-
-
-def bump_msg_size(message: bytes, extra: int) -> bytes:
-    if extra <= 0:
-        return message
-    pattern = re.compile(rb"(;; MSG SIZE  rcvd: )(\d+)")
-
-    def repl(match: "re.Match[bytes]") -> bytes:
-        return match.group(1) + str(int(match.group(2)) + extra).encode("ascii")
-
-    return pattern.sub(repl, message, count=1)
-
-
-def inject_one_message(message: bytes, lines: List[str]) -> bytes:
-    if not lines:
-        return message
-    extra = "".join(line + "\n" for line in lines).encode("utf-8")
-    count = len(lines)
-    if b";; ANSWER SECTION:\n" in message:
-        updated = bump_flags_answer(insert_into_answer_section(message, extra), count)
-    else:
-        updated = message.replace(b"status: NXDOMAIN", b"status: NOERROR", 1)
-        updated = insert_new_answer_section(bump_flags_answer(updated, count), extra)
-    return bump_msg_size(updated, extra_msg_size(lines))
-
-
 def merge_txt_overlay(stdout: bytes, extra_lines: List[str], short: bool) -> bytes:
-    """Put local TXT into ANSWER SECTION and bump ANSWER count.
-
-    MSG SIZE is increased by the compressed wire size of each local TXT.
-    +short has no sections, so extra lines are appended.  Timeout / no-header
-    output also appends.
-    """
+    """Keep the network reply intact; append overlay TXT lines after it."""
     if not extra_lines:
         return stdout
     extra = "".join(line + "\n" for line in extra_lines).encode("utf-8")
-    if short or not stdout or b";; ->>HEADER<<-" not in stdout:
-        if stdout and not stdout.endswith(b"\n"):
-            return stdout + b"\n" + extra
-        return stdout + extra
-
-    token = b";; Got answer:"
-    first = stdout.find(token)
-    if first < 0:
-        if stdout and not stdout.endswith(b"\n"):
-            return stdout + b"\n" + extra
-        return stdout + extra
-
-    head = stdout[:first]
-    chunks = stdout[first:].split(b"\n" + token)
-    sole = len(chunks) == 1
-    merged = [head, inject_one_message(chunks[0], extra_lines_for_message(chunks[0], extra_lines, sole))]
-    for chunk in chunks[1:]:
-        message = token + chunk
-        merged.append(
-            b"\n"
-            + inject_one_message(
-                message, extra_lines_for_message(message, extra_lines, False)
-            )
-        )
-    return b"".join(merged)
+    if short:
+        separator = b"\n" if stdout and not stdout.endswith(b"\n") else b""
+        return stdout + separator + extra
+    body = stdout.rstrip(b"\n")
+    if not body:
+        return extra
+    return body + b"\n\n" + extra
 
 
 def redirect_stdout_to_devnull() -> None:
@@ -1029,6 +929,19 @@ def return_like_child(return_code: int) -> int:
         signal.signal(child_signal, signal.SIG_DFL)
     os.kill(os.getpid(), child_signal)
     return 128 + child_signal
+
+
+def local_state_error(stage: str, error: Exception) -> str:
+    """Report only a fixed stage, exception class and errno, never TXT contents."""
+    reason = type(error).__name__
+    number = getattr(error, "errno", None)
+    if type(number) is int:
+        reason += " errno={}".format(number)
+    return (
+        "dig-wrapper: LOCAL STATE ERROR (本地状态错误) [{}]: {}; "
+        "local operation incomplete (本地操作未完成); "
+        "network result unchanged (网络结果未变).\n"
+    ).format(stage, reason)
 
 
 def main() -> int:
@@ -1057,19 +970,6 @@ def main() -> int:
     if not queries and stdin_payload is None:
         os.execv(REAL_DIG, [REAL_DIG] + args)
 
-    try:
-        directory = state_directory()
-    except (OSError, ValueError, WrapperError):
-        directory = None
-
-    if directory is not None and txt_value is not None:
-        names = [query.name for query in queries]
-        if names:
-            try:
-                apply_txt_records(directory, txt_value, names, txt_ttl)
-            except (OSError, ValueError, WrapperError, json.JSONDecodeError):
-                pass
-
     return_code, stdout = capture_real_dig(args, stdin_payload)
     if return_code not in {0, 9} or not queries:
         try:
@@ -1080,8 +980,29 @@ def main() -> int:
             redirect_stdout_to_devnull()
         return return_like_child(return_code)
 
+    # Do not save local records for a command the real backend rejected.
+    # Exit 9 still permits offline test data, but remains exit 9 to callers.
+    try:
+        # Reading a valid existing fixture must not depend on a writable lock
+        # or counter file. Atomic TXT replacement permits a complete old/new
+        # snapshot. Initialization still serializes the first owner creation.
+        directory = state_directory(initialize=False)
+    except (OSError, ValueError, WrapperError):
+        try:
+            directory = state_directory()
+        except (OSError, ValueError, WrapperError):
+            directory = None
+
+    if directory is not None and txt_value is not None:
+        names = [query.name for query in queries]
+        if names:
+            try:
+                apply_txt_records(directory, txt_value, names, txt_ttl)
+            except (OSError, ValueError, WrapperError, json.JSONDecodeError):
+                pass
+
+    records: Dict[str, Tuple[str, int]] = {}
     injected: List[str] = []
-    triggered: List[Query] = []
     if directory is not None:
         try:
             records = load_txt_records(directory)
@@ -1089,20 +1010,11 @@ def main() -> int:
         except (OSError, ValueError, WrapperError, json.JSONDecodeError):
             injected = []
         try:
-            triggered = update_counts(directory, queries)
+            update_counts(directory, queries)
         except (OSError, ValueError, WrapperError, json.JSONDecodeError):
-            triggered = []
+            pass
 
     extra_lines = list(injected)
-    for query in triggered:
-        if query.short:
-            extra_lines.append('"{}"'.format(MARKER))
-        else:
-            extra_lines.append(
-                '{}	60	IN	TXT	"{}"'.format(
-                    marker_owner_name(query.name), MARKER
-                )
-            )
 
     short = bool(queries) and all(query.short for query in queries)
     stdout = merge_txt_overlay(stdout, extra_lines, short)
