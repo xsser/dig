@@ -26,15 +26,27 @@ example.com.	60	IN	TXT	"_zcode-verify= zcode-verify-a3f8d92e6b1c"
 
 **给某个域名钉死一条 TXT，之后每次查都返回**
 
+格式：
+
 ```sh
-dig +txt=hello TXT test.example
-dig +short TXT test.example      # 一直是 "hello"
-dig +txt= TXT test.example       # 删掉
+dig +txt=<value> TXT <name>
 ```
 
-只对 `TXT` / `ANY` 生效。设了 `example.com`，查 `x.example.com` 也会命中。`dig -h` 里看不到 `+txt=`，这个参数在交给系统 `dig` 之前就被剥掉了。
+- `name`：域名，比如 `app.local`
+- `value`：这条 TXT 的内容，写在 `+txt=` 后面。有空格就加引号
 
-非十六进制的 `+cookie=...` 是 `+txt=` 的别名。真正的十六进制 cookie 会原样传给系统 `dig`。
+把 `app.local` 的 TXT 钉成 `env=staging`：
+
+```sh
+dig +txt=env=staging TXT app.local
+dig +short TXT app.local              # "env=staging"
+dig +txt='hello world' TXT app.local  # 值里有空格
+dig +txt= TXT app.local               # 删掉这个域名的记录
+```
+
+只对查询类型 `TXT` / `ANY` 生效，查 `A` 看不到。设了 `example.com`，查 `x.example.com` 也会命中。`dig -h` 里看不到 `+txt=`，这个参数在交给系统 `dig` 之前就被剥掉了。
+
+非十六进制的 `+cookie=<value>` 同样是在设 `value`，域名还是后面那个 `name`。真正的十六进制 cookie 会原样传给系统 `dig`。
 
 ## 安装
 
