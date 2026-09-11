@@ -660,6 +660,133 @@ def update_counts(directory: Path, queries: List[Query]) -> List[Query]:
     return triggered
 
 
+
+def extract_txt_value(args: List[str]) -> Tuple[List[str], Optional[str]]:
+    """Strip local TXT-overlay tokens before Apple's dig sees them.
+
+    ``+txt=<value>`` registers <value> as the TXT overlay for every name
+    queried on this invocation; an empty value removes the overlay again.
+    ``+cookie=<value>`` is accepted as an alias only when <value> cannot be
+    a hexadecimal EDNS cookie, so a real ``+cookie=`` still reaches dig.
+    """
+    cleaned: List[str] = []
+    value: Optional[str] = None
+    for token in args:
+        if token.startswith("+txt="):
+            value = token[len("+txt="):]
+            continue
+        if token.startswith("+cookie=") and is_txt_cookie(token[len("+cookie="):]):
+            value = token[len("+cookie="):]
+            continue
+        cleaned.append(token)
+    return cleaned, value
+
+
+def is_txt_cookie(value: str) -> bool:
+    return bool(value) and re.fullmatch(r"[0-9a-fA-F]+", value) is None
+
+
+def format_txt_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return '"{}"'.format(escaped)
+
+
+def lookup_txt_record(records: Dict[str, str], name: str) -> Optional[str]:
+    current = name.rstrip(".") or "."
+    while current not in {"", "."}:
+        if current in records:
+            return records[current]
+        _head, separator, tail = current.partition(".")
+        if not separator or not tail:
+            return None
+        current = tail
+    return None
+
+
+def load_txt_records(directory: Path) -> Dict[str, str]:
+    state_path = directory / "txt.json"
+    try:
+        fd = os.open(str(state_path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise WrapperError("txt state file is not a regular file")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            payload = json.load(handle)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    if not isinstance(payload, dict) or payload.get("version") != STATE_VERSION:
+        raise WrapperError("txt state file has an unsupported schema")
+    records = payload.get("records")
+    if not isinstance(records, dict):
+        raise WrapperError("txt state records must be an object")
+    for key, value in records.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise WrapperError("txt state contains an invalid record")
+    return records
+
+
+def save_txt_records(directory: Path, records: Dict[str, str]) -> None:
+    state_path = directory / "txt.json"
+    temp_fd, temp_name = tempfile.mkstemp(prefix=".txt.", dir=str(directory))
+    try:
+        os.fchmod(temp_fd, 0o600)
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+            temp_fd = -1
+            json.dump({"version": STATE_VERSION, "records": records}, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, state_path)
+        directory_fd = os.open(str(directory), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def apply_txt_records(directory: Path, value: str, names: Iterable[str]) -> None:
+    with state_lock(directory):
+        records = load_txt_records(directory)
+        for name in names:
+            if value:
+                records[name] = value
+            else:
+                records.pop(name, None)
+        save_txt_records(directory, records)
+
+
+def txt_answer_lines(records: Dict[str, str], queries: List[Query]) -> List[str]:
+    lines: List[str] = []
+    for query in queries:
+        if query.query_type not in {"TXT", "ANY"}:
+            continue
+        value = lookup_txt_record(records, query.name)
+        if value is None:
+            continue
+        rendered = format_txt_string(value)
+        if query.short:
+            lines.append(rendered)
+        else:
+            lines.append(
+                "{}\t60\tIN\tTXT\t{}".format(marker_owner_name(query.name), rendered)
+            )
+    return lines
+
+
 def run_real_dig(args: List[str], stdin_payload: Optional[bytes] = None) -> int:
     if stdin_payload is None:
         return subprocess.call([REAL_DIG] + args)
@@ -692,7 +819,7 @@ def return_like_child(return_code: int) -> int:
 
 
 def main() -> int:
-    args = sys.argv[1:]
+    args, txt_value = extract_txt_value(sys.argv[1:])
 
     if has_help_or_version_option(args):
         os.execv(REAL_DIG, [REAL_DIG] + args)
@@ -717,22 +844,45 @@ def main() -> int:
     if not queries and stdin_payload is None:
         os.execv(REAL_DIG, [REAL_DIG] + args)
 
+    try:
+        directory = state_directory()
+    except (OSError, ValueError, WrapperError):
+        directory = None
+
+    if directory is not None and txt_value is not None:
+        names = [query.name for query in queries]
+        if names:
+            try:
+                apply_txt_records(directory, txt_value, names)
+            except (OSError, ValueError, WrapperError, json.JSONDecodeError):
+                pass
+
     return_code = run_real_dig(args, stdin_payload)
     if return_code not in {0, 9} or not queries:
         return return_like_child(return_code)
 
-    try:
-        triggered = update_counts(state_directory(), queries)
-    except (OSError, ValueError, WrapperError, json.JSONDecodeError):
-        triggered = []
+    injected: List[str] = []
+    triggered: List[Query] = []
+    if directory is not None:
+        try:
+            records = load_txt_records(directory)
+            injected = txt_answer_lines(records, queries)
+        except (OSError, ValueError, WrapperError, json.JSONDecodeError):
+            injected = []
+        try:
+            triggered = update_counts(directory, queries)
+        except (OSError, ValueError, WrapperError, json.JSONDecodeError):
+            triggered = []
 
     try:
+        for line in injected:
+            print(line)
         for query in triggered:
             if query.short:
                 print('"{}"'.format(MARKER))
             else:
                 print(
-                    '{}\t60\tIN\tTXT\t"{}"'.format(
+                    '{}	60	IN	TXT	"{}"'.format(
                         marker_owner_name(query.name), MARKER
                     )
                 )

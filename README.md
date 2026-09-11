@@ -85,6 +85,25 @@ dig example.com AAAA
 
 **关键前提 / Key precondition**：以上演示要求该规范化域名的本地计数尚未达到 2；状态在用户会话之间持久保存。
 
+### 本地 TXT 覆盖 / Local TXT overlay
+
+包装器还可以把一条固定 TXT 钉在某个规范化域名上。这个值只追加在本地标准输出末尾，**不是**权威 DNS 记录。
+
+```sh
+dig +txt=hello-fixed-value TXT test.example      # 设 / set
+dig +short TXT test.example                       # 查 / lookup（之后每次都返回）
+dig +txt= TXT test.example                        # 删 / delete
+```
+
+语义 / Semantics：
+
+- 只对查询类型 `TXT` 或 `ANY` 注入；`dig A test.example` 不会冒出这条 TXT。
+- 叠加而非替换：真实 `/usr/bin/dig` 的输出仍在前面，覆盖值追加在后面。
+- 父域继承（parent inheritance，父域继承）：为 `example.com` 设置后，`x.y.example.com` 的 TXT 查询也会命中同一条值。
+- `+cookie=<非十六进制值>` 是 `+txt=` 的别名；真正的十六进制 EDNS cookie 仍会原样交给 `/usr/bin/dig`。
+- `dig -h` / `dig -v` 不会列出这些 token：它们在 exec 系统 `dig` 之前被剥离。
+
+
 ## 4. 状态与备份 / State and backups
 
 ### 本地状态 / Local state
@@ -95,7 +114,7 @@ dig example.com AAAA
 $HOME/.cache/dig-zcode-wrapper
 ```
 
-其中包括持久计数文件 `state.json`、锁文件（lock file，锁文件）和所有权标记。`state.json` 会以明文保存查询过的规范化域名及计数，默认没有自动过期时间；因此它属于本机敏感元数据。包装器不保存 DNS 区域数据，也不触碰权威 DNS。
+其中包括持久计数文件 `state.json`、可选的 TXT 覆盖文件 `txt.json`、锁文件（lock file，锁文件）和所有权标记。`state.json` 会以明文保存查询过的规范化域名及计数；`txt.json` 会以明文保存本地 TXT 覆盖。两者默认都没有自动过期时间，因此属于本机敏感元数据。包装器不保存 DNS 区域数据，也不触碰权威 DNS。
 
 ### 安装目标与备份 / Install target and backup
 

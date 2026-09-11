@@ -1313,4 +1313,135 @@ if state.get("version") != 2 or state.get("counts") != expected:
     )
 PY
 
+# Persistent local TXT overlay: +txt= (and non-hex +cookie=) register a value
+# that is appended on every later TXT/ANY lookup.  Tokens are stripped before
+# /usr/bin/dig sees them, so dig -h remains unchanged.
+txt_home=$(new_home txt-overlay)
+"$PYTHON" - "$WRAPPER" "$MARKER" "$txt_home" <<'TXTTEST'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+wrapper, marker, home_raw = sys.argv[1:]
+home = Path(home_raw)
+environment = os.environ.copy()
+environment["HOME"] = str(home)
+value = "unit-test-fixed-txt-value"
+quoted = '"{}"'.format(value).encode("utf-8")
+name = "txt-overlay-wrapper.example"
+child = "child.txt-overlay-wrapper.example"
+other = "txt-overlay-other.example"
+cookie_name = "txt-cookie-wrapper.example"
+hex_name = "txt-hexcookie-wrapper.example"
+common = ["@127.0.0.1", "-p", "9", "+short", "+time=1", "+tries=1"]
+
+
+def run(label, arguments):
+    try:
+        result = subprocess.run(
+            [wrapper] + arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit("FAIL: {} timed out".format(label))
+    if result.returncode not in {0, 9}:
+        raise SystemExit(
+            "FAIL: {} rc {} not in {{0, 9}}\nstdout={!r}\nstderr={!r}".format(
+                label, result.returncode, result.stdout, result.stderr
+            )
+        )
+    blob = (result.stdout + result.stderr).lower()
+    if b"traceback" in blob:
+        raise SystemExit("FAIL: {} emitted a traceback".format(label))
+    if b"couldn't parse" in blob or b"invalid option" in blob:
+        raise SystemExit("FAIL: {} leaked overlay token to real dig".format(label))
+    return result
+
+
+def records():
+    path = home / ".cache" / "dig-zcode-wrapper" / "txt.json"
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if payload.get("version") != 2 or not isinstance(payload.get("records"), dict):
+        raise SystemExit("FAIL: txt.json schema is wrong: {!r}".format(payload))
+    return payload["records"]
+
+
+help_result = subprocess.run(
+    [wrapper, "-h"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    env=environment,
+    timeout=10,
+    check=False,
+)
+help_text = (help_result.stdout + help_result.stderr).decode("utf-8", "replace")
+if "+txt=" in help_text or "txt.json" in help_text:
+    raise SystemExit("FAIL: wrapper-specific TXT overlay leaked into dig -h")
+
+first = run("set overlay", ["+txt=" + value, "TXT", name] + common)
+if quoted not in first.stdout:
+    raise SystemExit("FAIL: setting +txt= did not append the overlay")
+if records().get(name) != value:
+    raise SystemExit("FAIL: txt.json did not persist the overlay: {!r}".format(records()))
+
+second = run("persistent overlay", ["TXT", name] + common)
+if quoted not in second.stdout:
+    raise SystemExit("FAIL: later TXT lookup did not return the overlay")
+
+typed = run("type filter", ["A", name] + common)
+if quoted in typed.stdout:
+    raise SystemExit("FAIL: A lookup injected a TXT overlay")
+
+inherited = run("parent inheritance", ["TXT", child] + common)
+if quoted not in inherited.stdout:
+    raise SystemExit("FAIL: child domain did not inherit parent overlay")
+
+unrelated = run("unrelated domain", ["TXT", other] + common)
+if quoted in unrelated.stdout:
+    raise SystemExit("FAIL: overlay leaked to an unrelated domain")
+
+deleted = run("delete overlay", ["+txt=", "TXT", name] + common)
+if quoted in deleted.stdout:
+    raise SystemExit("FAIL: empty +txt= did not delete the overlay")
+if name in records():
+    raise SystemExit("FAIL: deleted overlay still present in txt.json")
+
+cookie = run("cookie alias", ["+cookie=not-a-hex-cookie", "TXT", cookie_name] + common)
+if b'"not-a-hex-cookie"' not in cookie.stdout:
+    raise SystemExit("FAIL: non-hex +cookie= alias did not register overlay")
+if records().get(cookie_name) != "not-a-hex-cookie":
+    raise SystemExit("FAIL: cookie alias did not persist")
+
+# Hexadecimal +cookie= is left for Apple's dig.  macOS DiG 9.10.6 does not
+# implement that option, so the real binary may exit 1 with "Invalid option".
+# The wrapper must still refuse to persist it as a TXT overlay.
+hex_value = "0123456789abcdef"
+try:
+    hex_cookie = subprocess.run(
+        [wrapper, "+cookie=" + hex_value, "TXT", hex_name] + common,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        timeout=30,
+        check=False,
+    )
+except subprocess.TimeoutExpired:
+    raise SystemExit("FAIL: hex cookie passthrough timed out")
+if b"traceback" in (hex_cookie.stdout + hex_cookie.stderr).lower():
+    raise SystemExit("FAIL: hex cookie passthrough emitted a traceback")
+if ('"' + hex_value + '"').encode("utf-8") in hex_cookie.stdout:
+    raise SystemExit("FAIL: hex +cookie= was treated as a TXT overlay")
+if hex_name in records():
+    raise SystemExit("FAIL: hex +cookie= wrote txt.json")
+TXTTEST
+
 printf '%s\n' 'PASS: stateful dig wrapper integration tests'
