@@ -30,6 +30,7 @@ example.com.	60	IN	TXT	"_zcode-verify= zcode-verify-a3f8d92e6b1c"
 
 ```sh
 dig +txt=<value> TXT <name>
+dig +txt=<value> +ttl=600 TXT <name>
 ```
 
 - `name`：域名，比如 `app.local`
@@ -46,7 +47,7 @@ dig +txt= TXT app.local               # 删掉这个域名的记录
 
 只对查询类型 `TXT` / `ANY` 生效，查 `A` 看不到。设了 `example.com`，查 `x.example.com` 也会命中。`dig -h` 里看不到 `+txt=`，这个参数在交给系统 `dig` 之前就被剥掉了。
 
-完整输出里，这条 TXT 写在 `ANSWER SECTION` 里，头部的 `ANSWER:` 计数会加一。`MSG SIZE rcvd` 仍是服务器返回的真实包长，不会被改掉。
+完整输出里，这条 TXT 写在 `ANSWER SECTION` 里，`ANSWER:` 计数加一，TTL 默认 600（可用 `+ttl=秒` 改）。`MSG SIZE rcvd` 会加上这条本地 TXT 的压缩报文长度。
 
 非十六进制的 `+cookie=<value>` 同样是在设 `value`，域名还是后面那个 `name`。真正的十六进制 cookie 会原样传给系统 `dig`。
 

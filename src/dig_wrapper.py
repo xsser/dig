@@ -661,25 +661,37 @@ def update_counts(directory: Path, queries: List[Query]) -> List[Query]:
 
 
 
-def extract_txt_value(args: List[str]) -> Tuple[List[str], Optional[str]]:
+OVERLAY_TTL = 600
+
+
+def extract_txt_value(
+    args: List[str],
+) -> Tuple[List[str], Optional[str], Optional[int]]:
     """Strip local TXT-overlay tokens before Apple's dig sees them.
 
     ``+txt=<value>`` registers <value> as the TXT overlay for every name
     queried on this invocation; an empty value removes the overlay again.
+    ``+ttl=<seconds>`` sets the presentation TTL for that overlay; default 600.
     ``+cookie=<value>`` is accepted as an alias only when <value> cannot be
     a hexadecimal EDNS cookie, so a real ``+cookie=`` still reaches dig.
     """
     cleaned: List[str] = []
     value: Optional[str] = None
+    ttl: Optional[int] = None
     for token in args:
         if token.startswith("+txt="):
             value = token[len("+txt="):]
             continue
+        if token.startswith("+ttl="):
+            suffix = token[len("+ttl="):]
+            if suffix.isdigit():
+                ttl = int(suffix)
+                continue
         if token.startswith("+cookie=") and is_txt_cookie(token[len("+cookie="):]):
             value = token[len("+cookie="):]
             continue
         cleaned.append(token)
-    return cleaned, value
+    return cleaned, value, ttl
 
 
 def is_txt_cookie(value: str) -> bool:
@@ -691,7 +703,9 @@ def format_txt_string(value: str) -> str:
     return '"{}"'.format(escaped)
 
 
-def lookup_txt_record(records: Dict[str, str], name: str) -> Optional[str]:
+def lookup_txt_record(
+    records: Dict[str, Tuple[str, int]], name: str
+) -> Optional[Tuple[str, int]]:
     current = name.rstrip(".") or "."
     while current not in {"", "."}:
         if current in records:
@@ -703,7 +717,7 @@ def lookup_txt_record(records: Dict[str, str], name: str) -> Optional[str]:
     return None
 
 
-def load_txt_records(directory: Path) -> Dict[str, str]:
+def load_txt_records(directory: Path) -> Dict[str, Tuple[str, int]]:
     state_path = directory / "txt.json"
     try:
         fd = os.open(str(state_path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
@@ -726,20 +740,35 @@ def load_txt_records(directory: Path) -> Dict[str, str]:
     records = payload.get("records")
     if not isinstance(records, dict):
         raise WrapperError("txt state records must be an object")
+    parsed: Dict[str, Tuple[str, int]] = {}
     for key, value in records.items():
-        if not isinstance(key, str) or not isinstance(value, str):
+        if not isinstance(key, str):
             raise WrapperError("txt state contains an invalid record")
-    return records
+        if isinstance(value, str):
+            parsed[key] = (value, OVERLAY_TTL)
+            continue
+        if isinstance(value, dict) and isinstance(value.get("value"), str):
+            ttl = value.get("ttl", OVERLAY_TTL)
+            if type(ttl) is not int or ttl < 0:
+                raise WrapperError("txt state contains an invalid ttl")
+            parsed[key] = (value["value"], ttl)
+            continue
+        raise WrapperError("txt state contains an invalid record")
+    return parsed
 
 
-def save_txt_records(directory: Path, records: Dict[str, str]) -> None:
+def save_txt_records(directory: Path, records: Dict[str, Tuple[str, int]]) -> None:
     state_path = directory / "txt.json"
     temp_fd, temp_name = tempfile.mkstemp(prefix=".txt.", dir=str(directory))
     try:
         os.fchmod(temp_fd, 0o600)
         with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
             temp_fd = -1
-            json.dump({"version": STATE_VERSION, "records": records}, handle, sort_keys=True)
+            payload = {
+                name: {"value": item[0], "ttl": item[1]}
+                for name, item in records.items()
+            }
+            json.dump({"version": STATE_VERSION, "records": payload}, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -758,31 +787,39 @@ def save_txt_records(directory: Path, records: Dict[str, str]) -> None:
             pass
 
 
-def apply_txt_records(directory: Path, value: str, names: Iterable[str]) -> None:
+def apply_txt_records(
+    directory: Path, value: str, names: Iterable[str], ttl: Optional[int] = None
+) -> None:
+    stored_ttl = OVERLAY_TTL if ttl is None else ttl
     with state_lock(directory):
         records = load_txt_records(directory)
         for name in names:
             if value:
-                records[name] = value
+                records[name] = (value, stored_ttl)
             else:
                 records.pop(name, None)
         save_txt_records(directory, records)
 
 
-def txt_answer_lines(records: Dict[str, str], queries: List[Query]) -> List[str]:
+def txt_answer_lines(
+    records: Dict[str, Tuple[str, int]], queries: List[Query]
+) -> List[str]:
     lines: List[str] = []
     for query in queries:
         if query.query_type not in {"TXT", "ANY"}:
             continue
-        value = lookup_txt_record(records, query.name)
-        if value is None:
+        record = lookup_txt_record(records, query.name)
+        if record is None:
             continue
+        value, ttl = record
         rendered = format_txt_string(value)
         if query.short:
             lines.append(rendered)
         else:
             lines.append(
-                "{}\t60\tIN\tTXT\t{}".format(marker_owner_name(query.name), rendered)
+                "{}\t{}\tIN\tTXT\t{}".format(
+                    marker_owner_name(query.name), ttl, rendered
+                )
             )
     return lines
 
@@ -871,22 +908,73 @@ def extra_lines_for_message(
     return selected
 
 
+def unescape_txt_presentation(rendered: str) -> str:
+    if len(rendered) >= 2 and rendered[0] == '"' and rendered[-1] == '"':
+        return rendered[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    return rendered
+
+
+def txt_rdata_wire_size(value: str) -> int:
+    raw = value.encode("utf-8")
+    if not raw:
+        return 1
+    size = 0
+    offset = 0
+    while offset < len(raw):
+        chunk = min(255, len(raw) - offset)
+        size += 1 + chunk
+        offset += chunk
+    return size
+
+
+def overlay_rr_wire_size(value: str) -> int:
+    # compressed name pointer + TYPE + CLASS + TTL + RDLEN + RDATA
+    return 2 + 2 + 2 + 4 + 2 + txt_rdata_wire_size(value)
+
+
+def extra_msg_size(lines: List[str]) -> int:
+    total = 0
+    for line in lines:
+        if line.startswith('"'):
+            value = unescape_txt_presentation(line)
+        elif "\tTXT\t" in line:
+            value = unescape_txt_presentation(line.split("\tTXT\t", 1)[1])
+        else:
+            continue
+        total += overlay_rr_wire_size(value)
+    return total
+
+
+def bump_msg_size(message: bytes, extra: int) -> bytes:
+    if extra <= 0:
+        return message
+    pattern = re.compile(rb"(;; MSG SIZE  rcvd: )(\d+)")
+
+    def repl(match: "re.Match[bytes]") -> bytes:
+        return match.group(1) + str(int(match.group(2)) + extra).encode("ascii")
+
+    return pattern.sub(repl, message, count=1)
+
+
 def inject_one_message(message: bytes, lines: List[str]) -> bytes:
     if not lines:
         return message
     extra = "".join(line + "\n" for line in lines).encode("utf-8")
     count = len(lines)
     if b";; ANSWER SECTION:\n" in message:
-        return bump_flags_answer(insert_into_answer_section(message, extra), count)
-    updated = message.replace(b"status: NXDOMAIN", b"status: NOERROR", 1)
-    return insert_new_answer_section(bump_flags_answer(updated, count), extra)
+        updated = bump_flags_answer(insert_into_answer_section(message, extra), count)
+    else:
+        updated = message.replace(b"status: NXDOMAIN", b"status: NOERROR", 1)
+        updated = insert_new_answer_section(bump_flags_answer(updated, count), extra)
+    return bump_msg_size(updated, extra_msg_size(lines))
 
 
 def merge_txt_overlay(stdout: bytes, extra_lines: List[str], short: bool) -> bytes:
     """Put local TXT into ANSWER SECTION and bump ANSWER count.
 
-    MSG SIZE stays the real server packet length.  +short has no sections, so
-    extra lines are appended.  Timeout / no-header output also appends.
+    MSG SIZE is increased by the compressed wire size of each local TXT.
+    +short has no sections, so extra lines are appended.  Timeout / no-header
+    output also appends.
     """
     if not extra_lines:
         return stdout
@@ -944,7 +1032,7 @@ def return_like_child(return_code: int) -> int:
 
 
 def main() -> int:
-    args, txt_value = extract_txt_value(sys.argv[1:])
+    args, txt_value, txt_ttl = extract_txt_value(sys.argv[1:])
 
     if has_help_or_version_option(args):
         os.execv(REAL_DIG, [REAL_DIG] + args)
@@ -978,7 +1066,7 @@ def main() -> int:
         names = [query.name for query in queries]
         if names:
             try:
-                apply_txt_records(directory, txt_value, names)
+                apply_txt_records(directory, txt_value, names, txt_ttl)
             except (OSError, ValueError, WrapperError, json.JSONDecodeError):
                 pass
 

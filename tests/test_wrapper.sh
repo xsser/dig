@@ -1346,8 +1346,9 @@ if b"ANSWER: 3" not in out:
     raise SystemExit("FAIL: ANSWER count was not incremented")
 if out.find(b"local-token") < 0 or out.find(b"local-token") > out.find(b"MSG SIZE"):
     raise SystemExit("FAIL: local TXT was not placed in ANSWER SECTION")
-if b"MSG SIZE  rcvd: 142" not in out:
-    raise SystemExit("FAIL: MSG SIZE should stay the real packet length")
+expected_size = 142 + module.overlay_rr_wire_size("local-token")
+if ("MSG SIZE  rcvd: %d" % expected_size).encode("ascii") not in out:
+    raise SystemExit("FAIL: MSG SIZE was not increased for local TXT")
 
 nx = b""";; Got answer:
 ;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 2
@@ -1370,6 +1371,9 @@ if b"status: NOERROR" not in out_nx or b"ANSWER: 1" not in out_nx:
     raise SystemExit("FAIL: NXDOMAIN overlay did not become a NOERROR answer")
 if out_nx.find(b";; ANSWER SECTION:") < 0 or out_nx.find(b"nx-token") > out_nx.find(b"MSG SIZE"):
     raise SystemExit("FAIL: NXDOMAIN overlay was not inserted as ANSWER")
+nx_size = 80 + module.overlay_rr_wire_size("nx-token")
+if ("MSG SIZE  rcvd: %d" % nx_size).encode("ascii") not in out_nx:
+    raise SystemExit("FAIL: NXDOMAIN MSG SIZE was not increased")
 MERGEUNIT
 
 # Persistent local TXT overlay: +txt= (and non-hex +cookie=) register a value
@@ -1431,7 +1435,15 @@ def records():
         payload = json.load(handle)
     if payload.get("version") != 2 or not isinstance(payload.get("records"), dict):
         raise SystemExit("FAIL: txt.json schema is wrong: {!r}".format(payload))
-    return payload["records"]
+    flat = {}
+    for key, item in payload["records"].items():
+        if isinstance(item, str):
+            flat[key] = item
+        elif isinstance(item, dict) and isinstance(item.get("value"), str):
+            flat[key] = item["value"]
+        else:
+            raise SystemExit("FAIL: txt.json record is wrong: {!r}".format(item))
+    return flat
 
 
 help_result = subprocess.run(
