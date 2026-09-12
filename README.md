@@ -47,8 +47,7 @@ app.local.	600	IN	TXT	"env=staging"
 
 同一域名的第 2 次查询**不会**再追加 `_zcode-verify` 标记。本机仍会记查询次数，但不改输出。
 
-![dig TXT overlay](docs/example.png)
-
+![dig TXT overlay](docs/digdns.png)
 
 ## 安装
 
