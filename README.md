@@ -1,4 +1,4 @@
-# stateful-dig-wrapper
+# dig
 
 macOS 上的本地 `dig` 包装器。真正发查询的还是系统自带的 `/usr/bin/dig`。这个项目只在你自己的终端输出后面追加一条本地 TXT，方便本地测试。
 
@@ -52,8 +52,8 @@ app.local.	600	IN	TXT	"env=staging"
 只支持 macOS，需要 `/usr/bin/dig` 和 `/usr/bin/python3`，没有 pip 依赖。
 
 ```sh
-git clone https://github.com/xsser/stateful-dig-wrapper.git
-cd stateful-dig-wrapper
+git clone https://github.com/xsser/dig.git
+cd dig
 ./scripts/install.sh
 export PATH="$HOME/.local/bin:$PATH"
 command -v dig    # 应该是 ~/.local/bin/dig
